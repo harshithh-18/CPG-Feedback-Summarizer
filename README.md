@@ -21,19 +21,22 @@ Customer Feedback Summarizer*.
    mode to extract sentiment, category, severity, a key phrase, and an
    actionable insight per record.
 4. **Aggregate** — pure-Python rollups: sentiment/category/channel counts, a
-   severity-weighted category ranking, top-5 priority issues, and a
-   week-bucketed volume trend.
+   severity-weighted category ranking, top-5 priority issues, emergent theme
+   tags, a week-bucketed volume trend, and per-city geo rollups.
 5. **Summarize** — one Azure call turns the aggregation into a business-toned
    executive summary + 3 recommended actions.
 6. **Chat** — ask questions answered *strictly* from the aggregated data.
+7. **Export** — download the full analysis as a self-contained, shareable PDF.
 
 ## Architecture
 
 | File | Responsibility |
 |------|----------------|
-| `app.py` | Streamlit UI — dataset picker/upload, KPIs, charts, priority table, chat |
+| `app.py` | Streamlit UI — dataset picker/upload, KPIs, charts, India map, priority table, chat, PDF export |
 | `pipeline.py` | Load/validate, PII scrub, batching, extraction orchestration, merge, aggregation (no LLM in aggregation) |
 | `azure_client.py` | `AzureOpenAI` wrapper + the 3 prompt templates (extraction, summary, chat) |
+| `geo.py` | Offline India gazetteer — resolves free-text `location` strings to lat/lon + canonical city names for the map |
+| `report.py` | Builds the downloadable PDF report (fpdf2) from the same aggregation + summary objects |
 | `data/feedback.json` | Bundled sample dataset (schema reference) |
 | `.streamlit/config.toml` | Theme + hidden default chrome |
 
@@ -86,9 +89,15 @@ Each feedback record:
   "date": "YYYY-MM-DD",
   "rating": 1,
   "text": "the feedback text",
-  "subject": "optional subject or null"
+  "subject": "optional subject or null",
+  "location": "optional city/state, e.g. \"Mumbai\" — powers the India map"
 }
 ```
+
+`location` is optional: when present, `geo.py` resolves it against a bundled
+offline gazetteer of Indian cities/states to render a Scattergeo bubble map
+(bubble size = volume, color = dominant issue). When absent, the map is
+replaced by a friendly placeholder — no other section is affected.
 
 ## Offline sanity check
 
