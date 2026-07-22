@@ -1,0 +1,114 @@
+[
+  {
+    "id": 1,
+    "channel": "social_review",
+    "date": "2024-05-02",
+    "rating": 2,
+    "text": "The new formula of your granola bars tastes way too artificial and sugary compared to last year. Really disappointed. My email is jenna.roberts@example.com if you want to reach out.",
+    "subject": null
+  },
+  {
+    "id": 2,
+    "channel": "survey",
+    "date": "2024-05-03",
+    "rating": 4,
+    "text": "Overall happy with the product quality, but the resealable pouch never actually seals properly and the chips go stale in a day.",
+    "subject": "Packaging feedback"
+  },
+  {
+    "id": 3,
+    "channel": "support_ticket",
+    "date": "2024-05-05",
+    "rating": null,
+    "text": "I ordered a case of the sparkling water and three of the cans arrived dented and leaking. This is the second time. Please call me at (415) 555-0192. - Marcus Lee",
+    "subject": "Damaged shipment again"
+  },
+  {
+    "id": 4,
+    "channel": "social_review",
+    "date": "2024-05-08",
+    "rating": 5,
+    "text": "Absolutely love the new oat milk creamer! Blends perfectly in my coffee and no weird aftertaste. Best one on the market.",
+    "subject": null
+  },
+  {
+    "id": 5,
+    "channel": "survey",
+    "date": "2024-05-10",
+    "rating": 1,
+    "text": "Prices have gone up almost 30% in six months for the same box of cereal. I can't justify buying it anymore, switching to a store brand.",
+    "subject": "Pricing concerns"
+  },
+  {
+    "id": 6,
+    "channel": "support_ticket",
+    "date": "2024-05-12",
+    "rating": null,
+    "text": "Your customer service line kept me on hold for 45 minutes and then disconnected. Nobody followed up on my refund request. Contact: sofia_martinez@example.org",
+    "subject": "No response on refund"
+  },
+  {
+    "id": 7,
+    "channel": "social_review",
+    "date": "2024-05-15",
+    "rating": 3,
+    "text": "The protein cookies are decent but I can never find the chocolate flavor in any store near me. Always sold out or not stocked.",
+    "subject": null
+  },
+  {
+    "id": 8,
+    "channel": "survey",
+    "date": "2024-05-16",
+    "rating": 5,
+    "text": "Great value for the family-size pack and the kids love the taste. Will keep buying.",
+    "subject": "Happy customer"
+  },
+  {
+    "id": 9,
+    "channel": "support_ticket",
+    "date": "2024-05-19",
+    "rating": null,
+    "text": "Found a small piece of plastic in my yogurt cup. Very concerning from a quality standpoint. Reachable at 212-555-0148 or david.kim@example.com.",
+    "subject": "Foreign object in product"
+  },
+  {
+    "id": 10,
+    "channel": "social_review",
+    "date": "2024-05-22",
+    "rating": 2,
+    "text": "New packaging design looks nice but it's impossible to open without scissors. My grandmother gave up entirely.",
+    "subject": null
+  },
+  {
+    "id": 11,
+    "channel": "survey",
+    "date": "2024-05-24",
+    "rating": 4,
+    "text": "Taste is fantastic and consistent. Only wish the sugar-free version was easier to find in stores.",
+    "subject": "Product availability"
+  },
+  {
+    "id": 12,
+    "channel": "support_ticket",
+    "date": "2024-05-27",
+    "rating": null,
+    "text": "The rewards app charged me twice for one order. Support was actually super helpful and refunded quickly though. Thanks Priya Nair!",
+    "subject": "Double charge resolved"
+  },
+  {
+    "id": 13,
+    "channel": "social_review",
+    "date": "2024-05-29",
+    "rating": 1,
+    "text": "Bought a six-pack and every single bottle had a different fill level. Quality control is clearly slipping.",
+    "subject": null
+  },
+  {
+    "id": 14,
+    "channel": "survey",
+    "date": "2024-05-31",
+    "rating": 3,
+    "text": "The flavor is good but the price point is a bit high for the portion size you get. Would buy more if it were cheaper.",
+    "subject": "Value for money"
+  }
+]
