@@ -1,16 +1,15 @@
 """CPG Customer Feedback Summarizer — Streamlit entrypoint.
 
-Load feedback -> Analyze (PII scrub -> Azure extraction -> aggregation ->
+Upload feedback -> Analyze (PII scrub -> extraction -> aggregation ->
 executive summary) -> dashboard + grounded chat Q&A.
 
-Credentials come only from environment variables / Streamlit secrets. The
-raw feedback text is PII-scrubbed before the only Azure call that sees it
-(Call 1); Calls 2 and 3 receive aggregated data only.
+Input is upload-only (.csv / .json). Credentials come only from environment
+variables / Streamlit secrets. Raw feedback text is PII-scrubbed before the
+only model call that sees it (Call 1); Calls 2 and 3 receive aggregated data
+only.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -31,50 +30,162 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Cheap polish: hide default chrome + light custom styling ------------------
+
+# --- Session state ------------------------------------------------------------
+def _init_state() -> None:
+    st.session_state.setdefault("records", None)
+    st.session_state.setdefault("source_label", None)
+    st.session_state.setdefault("results", None)
+    st.session_state.setdefault("chat_history", [])
+    st.session_state.setdefault("dark_mode", False)
+
+
+_init_state()
+
+
+# --- Theme (creative violet/teal/coral palette, validated for CVD) ------------
+# Two full palettes: light and dark, each dataviz-validated. The dark-mode
+# toggle drives CSS variables so every surface, text token, and chart re-themes.
+DARK = st.session_state.dark_mode
+
+if DARK:
+    C = {
+        "bg": "#0E1117",
+        "surface": "#171B26",
+        "surface2": "#1F2430",
+        "border": "#2A3040",
+        "ink": "#ECEFF6",
+        "ink2": "#A9B2C4",
+        "accent": "#7B6EF0",   # violet
+        "teal": "#12A883",
+        "coral": "#DE6A4E",
+        "blue": "#2C7FC7",
+        "amber": "#B8891F",
+        "grad1": "#7B6EF0",
+        "grad2": "#DE6A4E",
+    }
+else:
+    C = {
+        "bg": "#FAF9FC",
+        "surface": "#FFFFFF",
+        "surface2": "#F3F1FB",
+        "border": "#E7E3F5",
+        "ink": "#1A1626",
+        "ink2": "#6B6580",
+        "accent": "#6C5CE7",   # violet
+        "teal": "#00A383",
+        "coral": "#E17055",
+        "blue": "#0984E3",
+        "amber": "#D4A017",
+        "grad1": "#6C5CE7",
+        "grad2": "#E17055",
+    }
+
+# Status colors for sentiment (consistent, meaning-carrying).
+SENTIMENT_COLORS = {
+    "positive": C["teal"],
+    "negative": C["coral"],
+    "neutral": C["blue"],
+}
+
 st.markdown(
-    """
+    f"""
     <style>
-      #MainMenu {visibility: hidden;}
-      footer {visibility: hidden;}
-      header [data-testid="stToolbar"] {visibility: hidden;}
-      .block-container {padding-top: 2.2rem; padding-bottom: 3rem;}
-      div[data-testid="stMetric"] {
-          background: #F5F1EC;
-          border: 1px solid #ECE3D8;
-          border-radius: 12px;
-          padding: 16px 18px;
-      }
-      div[data-testid="stMetric"] label p {font-size: 0.85rem; color:#6B6257;}
-      .app-title {font-size: 2.0rem; font-weight: 700; margin-bottom: 0.1rem;}
-      .app-sub {color:#6B6257; font-size:1.02rem; margin-bottom:0.4rem;}
-      .pill {display:inline-block; padding:2px 10px; border-radius:999px;
-             background:#FBEADB; color:#B5591A; font-size:0.78rem; font-weight:600;}
+      :root {{
+        --bg: {C['bg']}; --surface: {C['surface']}; --surface2: {C['surface2']};
+        --border: {C['border']}; --ink: {C['ink']}; --ink2: {C['ink2']};
+        --accent: {C['accent']};
+      }}
+      .stApp {{ background: var(--bg); color: var(--ink); }}
+      #MainMenu, footer, header [data-testid="stToolbar"] {{ visibility: hidden; }}
+      .block-container {{ padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1200px; }}
+
+      h1,h2,h3,h4,h5,h6, p, span, label, li {{ color: var(--ink); }}
+      .stMarkdown p {{ color: var(--ink); }}
+
+      /* Hero header */
+      .hero {{
+        background: linear-gradient(120deg, {C['grad1']} 0%, {C['grad2']} 100%);
+        border-radius: 18px; padding: 26px 30px; margin-bottom: 8px;
+        color: #fff; box-shadow: 0 10px 30px -12px {C['grad1']}66;
+      }}
+      .hero h1 {{ color:#fff; font-size:2.0rem; font-weight:800; margin:0; letter-spacing:-0.5px; }}
+      .hero p {{ color:#ffffffdd; margin:6px 0 0; font-size:1.02rem; }}
+
+      /* Headline banner (Call 2 output) */
+      .headline {{
+        background: var(--surface); border:1px solid var(--border);
+        border-left: 6px solid var(--accent);
+        border-radius: 14px; padding: 20px 24px; margin: 8px 0 6px;
+        font-size: 1.45rem; font-weight: 750; line-height:1.3; color: var(--ink);
+        box-shadow: 0 6px 20px -14px #00000055;
+      }}
+      .headline .tag {{
+        display:inline-block; font-size:0.7rem; font-weight:700; letter-spacing:0.14em;
+        text-transform:uppercase; color: var(--accent); margin-bottom:6px;
+      }}
+
+      /* KPI metric cards */
+      div[data-testid="stMetric"] {{
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 14px; padding: 18px 20px;
+        box-shadow: 0 4px 16px -12px #00000040;
+      }}
+      div[data-testid="stMetric"] label p {{ font-size:0.82rem; color: var(--ink2); }}
+      div[data-testid="stMetricValue"] {{ color: var(--accent); font-weight:800; }}
+
+      /* Section cards */
+      .card {{
+        background: var(--surface); border:1px solid var(--border);
+        border-radius:14px; padding:18px 22px; margin-bottom:6px;
+      }}
+      .sec-label {{ font-size:0.72rem; font-weight:700; letter-spacing:0.12em;
+        text-transform:uppercase; color: var(--ink2); margin-bottom:2px; }}
+
+      /* Theme tag pills */
+      .themebar {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:4px; }}
+      .pill {{
+        display:inline-flex; align-items:center; gap:6px;
+        background: var(--surface2); border:1px solid var(--border);
+        color: var(--ink); border-radius:999px; padding:5px 12px; font-size:0.86rem;
+      }}
+      .pill b {{ color: var(--accent); }}
+
+      /* Buttons */
+      .stButton > button, .stDownloadButton > button {{
+        border-radius: 10px; font-weight:600;
+      }}
+      div[data-testid="stFileUploader"] {{
+        background: var(--surface); border:1px dashed var(--border);
+        border-radius:14px; padding:8px 12px;
+      }}
+      hr {{ border-color: var(--border); }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# --- Session state ------------------------------------------------------------
-def _init_state() -> None:
-    st.session_state.setdefault("records", None)
-    st.session_state.setdefault("source_label", None)
-    st.session_state.setdefault("results", None)  # {merged, aggregation, summary, warnings}
-    st.session_state.setdefault("chat_history", [])  # list[(role, text)]
-
-
-_init_state()
-
-
-# --- Header -------------------------------------------------------------------
-st.markdown('<div class="app-title">📊 CPG Feedback Summarizer</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="app-sub">Turn bulk customer feedback from social, survey, and '
-    "support channels into an executive summary, a priority action list, and "
-    "grounded Q&amp;A — powered by Azure OpenAI.</div>",
-    unsafe_allow_html=True,
-)
+# --- Header + dark-mode toggle ------------------------------------------------
+head_l, head_r = st.columns([5, 1])
+with head_l:
+    st.markdown(
+        """
+        <div class="hero">
+          <h1>📊 CPG Feedback Summarizer</h1>
+          <p>Turn bulk customer feedback from social, survey &amp; support channels
+          into a specific executive summary, priority actions, emergent themes,
+          and grounded Q&amp;A.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with head_r:
+    st.write("")
+    dark = st.toggle("🌙 Dark mode", value=st.session_state.dark_mode)
+    if dark != st.session_state.dark_mode:
+        st.session_state.dark_mode = dark
+        st.rerun()
 
 if not az.azure_is_configured():
     st.warning(
@@ -84,14 +195,12 @@ if not az.azure_is_configured():
         icon="⚠️",
     )
 
-st.divider()
 
-
-# --- Data loading controls ----------------------------------------------------
+# --- Data loading (upload-only) ----------------------------------------------
 def _load_records(records: list[dict], label: str) -> None:
     st.session_state.records = records
     st.session_state.source_label = label
-    st.session_state.results = None  # invalidate stale analysis
+    st.session_state.results = None
     st.session_state.chat_history = []
 
 
@@ -108,7 +217,7 @@ def _run_analysis(records: list[dict]) -> None:
         warnings: list[str] = []
         try:
             merged, warnings = pl.run_extraction(records, client.extract_batch)
-        except Exception as exc:  # network/auth catastrophic failure
+        except Exception as exc:  # catastrophic network/auth failure
             st.error(f"Analysis failed during extraction: {exc}")
             return
 
@@ -121,7 +230,7 @@ def _run_analysis(records: list[dict]) -> None:
 
         aggregation = pl.aggregate(merged)
 
-        summary = {"summary": "", "top_actions": []}
+        summary = {"headline": "", "summary": "", "top_actions": []}
         try:
             summary = client.executive_summary(aggregation)
         except az.AzureCallError as exc:
@@ -136,46 +245,24 @@ def _run_analysis(records: list[dict]) -> None:
     st.session_state.chat_history = []
 
 
-left, right = st.columns([1, 1], gap="large")
-
-with left:
-    st.markdown("##### 1 · Choose a bundled dataset")
-    bundled = pl.list_bundled_datasets()
-    if bundled:
-        names = [p.name for p in bundled]
-        chosen = st.selectbox(
-            "Datasets discovered in `data/`",
-            names,
-            index=0,
-            label_visibility="collapsed",
-        )
-        if st.button("Load selected dataset", type="primary", use_container_width=True):
-            path = pl.DATA_DIR / chosen
-            try:
-                recs = pl.load_feedback(path)
-                _load_records(recs, chosen)
-            except pl.DatasetError as exc:
-                st.error(f"Could not load `{chosen}`: {exc}")
-    else:
-        st.info("No datasets found in `data/`. Use the uploader on the right.")
-
-with right:
-    st.markdown("##### 2 · …or upload your own (`.csv` / `.json`)")
-    up = st.file_uploader(
-        "Upload feedback file",
-        type=["csv", "json"],
-        label_visibility="collapsed",
-    )
-    if up is not None:
-        if st.button("Load uploaded file", use_container_width=True):
-            try:
-                recs = pl.load_uploaded(up.name, up.getvalue())
-                _load_records(recs, up.name)
-            except pl.DatasetError as exc:
-                st.error(f"Invalid file: {exc}")
+st.markdown("#### 1 · Upload your feedback file")
+st.caption("Accepted: `.csv` or `.json` — same schema as the data contract "
+           "(id, channel, date, rating, text, subject).")
+up = st.file_uploader(
+    "Upload feedback file",
+    type=["csv", "json"],
+    label_visibility="collapsed",
+)
+if up is not None:
+    if st.button("📥 Load file", use_container_width=True):
+        try:
+            recs = pl.load_uploaded(up.name, up.getvalue())
+            _load_records(recs, up.name)
+        except pl.DatasetError as exc:
+            st.error(f"Invalid file: {exc}")
 
 
-# --- Loaded-data status + Analyze --------------------------------------------
+# --- Loaded status + Analyze --------------------------------------------------
 records = st.session_state.records
 if records:
     n = len(records)
@@ -185,7 +272,6 @@ if records:
         f"channels: {', '.join(channels)}",
         icon="✅",
     )
-
     analyze_disabled = not az.azure_is_configured()
     if st.button(
         "🚀 Analyze feedback",
@@ -196,35 +282,43 @@ if records:
         _run_analysis(records)
 
 
-# --- Dashboard ----------------------------------------------------------------
-def _bar_from_counts(counts: dict, name: str, value: str) -> pd.DataFrame:
-    df = pd.DataFrame(sorted(counts.items(), key=lambda kv: kv[1], reverse=True),
-                      columns=[name, value])
+# --- Chart helpers ------------------------------------------------------------
+def _bar_df(counts: dict, name: str, value: str) -> pd.DataFrame:
+    df = pd.DataFrame(
+        sorted(counts.items(), key=lambda kv: kv[1], reverse=True),
+        columns=[name, value],
+    )
     return df.set_index(name)
 
 
 def _render_dashboard(results: dict) -> None:
     agg = results["aggregation"]
     summary = results["summary"]
-    merged = results["merged"]
 
     for w in results["warnings"]:
         st.warning(w, icon="⚠️")
 
     st.divider()
 
-    # 1 — KPI row
+    # 1 — Headline banner (specific, from Call 2)
+    headline = summary.get("headline", "").strip()
+    if headline:
+        st.markdown(
+            f'<div class="headline"><span class="tag">Key finding</span><br>{headline}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # 2 — KPI row
     total = agg["total"]
     neg = agg["sentiment_counts"].get("negative", 0)
     pct_neg = (neg / total * 100) if total else 0
     top_issue = agg["ranked_categories"][0][0] if agg["ranked_categories"] else "—"
-
     k1, k2, k3 = st.columns(3)
     k1.metric("Total feedback analyzed", f"{total:,}")
     k2.metric("% negative sentiment", f"{pct_neg:.0f}%")
     k3.metric("Top issue category", top_issue.replace("_", " ").title())
 
-    # 2 — Executive summary
+    # 3 — Executive summary
     st.markdown("### 📝 Executive summary")
     if summary.get("summary"):
         st.write(summary["summary"])
@@ -237,38 +331,56 @@ def _render_dashboard(results: dict) -> None:
 
     st.divider()
 
-    # 3 — Charts row
+    # 4 — Charts row: category + sentiment
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("##### Feedback by category")
-        st.bar_chart(_bar_from_counts(agg["category_counts"], "category", "count"),
-                     color="#E8792B")
+        st.caption("Fixed macro-taxonomy — stable across datasets.")
+        st.bar_chart(_bar_df(agg["category_counts"], "category", "count"),
+                     color=C["accent"], horizontal=True)
     with c2:
         st.markdown("##### Sentiment breakdown")
-        st.bar_chart(_bar_from_counts(agg["sentiment_counts"], "sentiment", "count"),
-                     color="#5B8C5A")
+        sdf = _bar_df(agg["sentiment_counts"], "sentiment", "count")
+        st.bar_chart(sdf, color=C["blue"])
 
-    # 4 — Channel breakdown + trend
+    # 5 — Emergent themes (the dataset-specific section)
+    st.markdown("### 🏷️ Themes found in this dataset")
+    st.caption("Emergent, free-form theme tags extracted from *this* feedback — "
+               "this section looks completely different for every dataset.")
+    themes = agg.get("top_emergent_themes", [])
+    if themes:
+        tdf = pd.DataFrame(themes, columns=["theme", "count"]).set_index("theme")
+        st.bar_chart(tdf, color=C["teal"], horizontal=True)
+        pills = "".join(
+            f'<span class="pill">{t} <b>{c}</b></span>' for t, c in themes
+        )
+        st.markdown(f'<div class="themebar">{pills}</div>', unsafe_allow_html=True)
+    else:
+        st.info("No emergent themes extracted.")
+
+    st.divider()
+
+    # 6 — Channel breakdown + trend
     c3, c4 = st.columns(2)
     with c3:
         st.markdown("##### Feedback by channel")
         ch = {k.replace("_", " ").title(): v for k, v in agg["channel_counts"].items()}
-        st.bar_chart(_bar_from_counts(ch, "channel", "count"), color="#C99A3B")
+        st.bar_chart(_bar_df(ch, "channel", "count"), color=C["amber"])
     with c4:
         st.markdown("##### Volume trend (top categories)")
         trend = agg["date_trend"]
         if trend:
             weeks = sorted({w for cat in trend.values() for w in cat})
-            tdf = pd.DataFrame({"week": weeks})
+            trdf = pd.DataFrame({"week": weeks})
             for cat, buckets in trend.items():
-                tdf[cat] = [buckets.get(w, 0) for w in weeks]
-            st.line_chart(tdf.set_index("week"))
+                trdf[cat] = [buckets.get(w, 0) for w in weeks]
+            st.line_chart(trdf.set_index("week"))
         else:
             st.info("Not enough dated records for a trend.")
 
     st.divider()
 
-    # 5 — Top 5 priority issues
+    # 7 — Top 5 priority issues (category, theme_tag, severity, insight, preview, channel)
     st.markdown("### 🔥 Top 5 priority issues")
     st.caption("Ranked by severity, most recent first on ties.")
     rows = []
@@ -276,22 +388,21 @@ def _render_dashboard(results: dict) -> None:
         rows.append(
             {
                 "Category": r["category"].replace("_", " ").title(),
+                "Theme": r.get("theme_tag", "—"),
                 "Severity": r["severity"],
-                "Key phrase": r["key_phrase"],
                 "Actionable insight": r["actionable_insight"] or "—",
-                "Preview": (r["text"][:90] + "…") if len(r["text"]) > 90 else r["text"],
+                "Preview": (r["text"][:80] + "…") if len(r["text"]) > 80 else r["text"],
+                "Channel": r["channel"].replace("_", " ").title(),
             }
         )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # 6 — Chat Q&A
+    # 8 — Chat Q&A
     st.markdown("### 💬 Ask about this feedback")
-    st.caption(
-        "Answers are grounded strictly in the aggregated data above — no raw "
-        "feedback text is sent to this call."
-    )
+    st.caption("Answers are grounded strictly in the aggregated data — no raw "
+               "feedback text is sent to this call.")
     for role, text in st.session_state.chat_history:
         with st.chat_message(role):
             st.write(text)
@@ -315,4 +426,4 @@ def _render_dashboard(results: dict) -> None:
 if st.session_state.results:
     _render_dashboard(st.session_state.results)
 elif not records:
-    st.info("👆 Load a dataset to get started.", icon="💡")
+    st.info("👆 Upload a `.csv` or `.json` feedback file to get started.", icon="💡")

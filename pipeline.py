@@ -18,6 +18,7 @@ import io
 import json
 import re
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -44,6 +45,7 @@ DATA_PATH = DATA_DIR / "feedback.json"
 BATCH_SIZE = 25
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB cap
 ALLOWED_EXTENSIONS = {".json", ".csv"}
+MAX_BATCH_WORKERS = 6  # concurrent Call 1 requests in flight
 
 
 class DatasetError(ValueError):
@@ -256,23 +258,29 @@ def run_extraction(
     warnings: list[str] = []
     scrubbed = scrub_records(records)
     by_id = {r["id"]: r for r in scrubbed}
+    batches = make_batches(scrubbed)
 
     extractions: dict[int, dict[str, Any]] = {}
-    for bi, batch in enumerate(make_batches(scrubbed), start=1):
-        payload = batch_payload(batch)
-        try:
-            results = extract_fn(payload)
-        except Exception as exc:  # noqa: BLE001 - drop batch, keep going
-            msg = f"Batch {bi} dropped ({len(batch)} records): {exc}"
-            warnings.append(msg)
-            if on_warning:
-                on_warning(msg)
-            continue
+    with ThreadPoolExecutor(max_workers=min(MAX_BATCH_WORKERS, len(batches))) as pool:
+        future_to_bi = {
+            pool.submit(extract_fn, batch_payload(batch)): (bi, batch)
+            for bi, batch in enumerate(batches, start=1)
+        }
+        for future in as_completed(future_to_bi):
+            bi, batch = future_to_bi[future]
+            try:
+                results = future.result()
+            except Exception as exc:  # noqa: BLE001 - drop batch, keep going
+                msg = f"Batch {bi} dropped ({len(batch)} records): {exc}"
+                warnings.append(msg)
+                if on_warning:
+                    on_warning(msg)
+                continue
 
-        for res in results:
-            norm = _normalize_extraction(res)
-            if norm is not None and norm["id"] in by_id:
-                extractions[norm["id"]] = norm
+            for res in results:
+                norm = _normalize_extraction(res)
+                if norm is not None and norm["id"] in by_id:
+                    extractions[norm["id"]] = norm
 
     merged: list[dict[str, Any]] = []
     for rid, raw in by_id.items():
@@ -288,6 +296,7 @@ def run_extraction(
                 "text": raw["text"],  # already PII-scrubbed
                 "sentiment": ext["sentiment"],
                 "category": ext["category"],
+                "theme_tag": ext["theme_tag"],
                 "severity": ext["severity"],
                 "key_phrase": ext["key_phrase"],
                 "actionable_insight": ext["actionable_insight"],
@@ -321,6 +330,10 @@ def _normalize_extraction(res: Any) -> dict[str, Any] | None:
 
     key_phrase = str(res.get("key_phrase", "")).strip()[:120]
 
+    theme_tag = str(res.get("theme_tag", "")).strip()[:60]
+    if not theme_tag:
+        theme_tag = key_phrase or category
+
     insight = res.get("actionable_insight")
     insight = None if insight in (None, "", "null") else str(insight).strip()
 
@@ -328,6 +341,7 @@ def _normalize_extraction(res: Any) -> dict[str, Any] | None:
         "id": rid,
         "sentiment": sentiment,
         "category": category,
+        "theme_tag": theme_tag,
         "severity": severity,
         "key_phrase": key_phrase,
         "actionable_insight": insight,
@@ -379,6 +393,20 @@ def aggregate(merged: list[dict[str, Any]]) -> dict[str, Any]:
                 buckets[_week_bucket(r["date"])] += 1
         date_trend[cat] = dict(sorted(buckets.items()))
 
+    # Emergent themes: ~8-10 most frequent theme_tags (case-insensitive group).
+    theme_labels: dict[str, str] = {}  # lowercase -> first-seen display form
+    theme_counter: Counter[str] = Counter()
+    for r in merged:
+        tag = (r.get("theme_tag") or "").strip()
+        if not tag:
+            continue
+        key = tag.lower()
+        theme_labels.setdefault(key, tag)
+        theme_counter[key] += 1
+    top_emergent_themes = [
+        (theme_labels[k], c) for k, c in theme_counter.most_common(10)
+    ]
+
     return {
         "total": total,
         "sentiment_counts": dict(sentiment_counts),
@@ -387,6 +415,7 @@ def aggregate(merged: list[dict[str, Any]]) -> dict[str, Any]:
         "ranked_categories": ranked_categories,
         "top_priority": top_priority,
         "date_trend": date_trend,
+        "top_emergent_themes": top_emergent_themes,
     }
 
 

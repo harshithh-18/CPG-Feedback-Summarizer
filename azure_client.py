@@ -33,12 +33,18 @@ ENV_OMIT_TEMPERATURE = "AZURE_OPENAI_OMIT_TEMPERATURE"
 # --- System prompts (verbatim from CLAUDE.md) ---
 EXTRACTION_SYSTEM_PROMPT = (
     "You are a CPG customer feedback analyst. For each feedback item given, "
-    "extract sentiment, category, severity, a short key phrase, and an "
-    "actionable insight if one exists. Categories are limited to: taste, "
-    "packaging, price, availability, quality, customer_service, other. Return "
-    'only valid JSON matching this shape: {"results": [{"id": <int>, '
-    '"sentiment": ..., "category": ..., "severity": <1-5 int>, "key_phrase": '
-    '..., "actionable_insight": <string or null>}]}. No text outside the JSON '
+    "extract sentiment, category, a specific theme tag, severity, a short key "
+    "phrase, and an actionable insight if one exists. Categories are limited "
+    "to: taste, packaging, price, availability, quality, customer_service, "
+    "other — always pick from this fixed list. The theme tag is different: it "
+    "is NOT from a fixed list, it should be the most specific 2-4 word "
+    "description of the actual issue or praise in this particular piece of "
+    'feedback (e.g. "resealable pouch tears", "bulk discount request") — be '
+    "concrete and specific to what this feedback actually says, not a "
+    "restatement of the category. Return only valid JSON matching this shape: "
+    '{"results": [{"id": <int>, "sentiment": ..., "category": ..., '
+    '"theme_tag": ..., "severity": <1-5 int>, "key_phrase": ..., '
+    '"actionable_insight": <string or null>}]}. No text outside the JSON '
     "object."
 )
 
@@ -47,11 +53,19 @@ EXTRACTION_RETRY_SUFFIX = (
 )
 
 SUMMARY_SYSTEM_PROMPT = (
-    "You are writing a concise executive summary for a product and marketing "
-    "team, based on aggregated CPG customer feedback statistics. Be specific, "
-    "business-toned, and actionable. Return only valid JSON: "
-    '{"summary": <3-5 sentence string>, "top_actions": [<string>, <string>, '
-    "<string>]}."
+    "You are writing an executive summary for a product and marketing team, "
+    "based on aggregated CPG customer feedback statistics, including a list of "
+    "the most frequent emergent themes in this specific dataset. Your job is "
+    "to make this read as clearly about THIS dataset, not a generic template "
+    "— cite actual numbers, percentages, category names, and theme tags from "
+    "the data provided. Never write a sentence that could apply unchanged to "
+    "any other dataset. First write a headline: one punchy sentence, under 12 "
+    "words, naming the single most notable specific finding. Then a 3-5 "
+    "sentence summary citing at least one number and one theme tag or key "
+    "phrase verbatim from the data. Then exactly 3 top actions, each naming a "
+    "specific category or theme tag with its frequency or severity, not "
+    'generic advice. Return only valid JSON: {"headline": <string>, '
+    '"summary": <string>, "top_actions": [<string>, <string>, <string>]}.'
 )
 
 CHAT_SYSTEM_PROMPT = (
@@ -192,12 +206,13 @@ class CPGAzureClient:
         except Exception as exc:  # noqa: BLE001
             raise AzureCallError(f"Executive summary call failed: {exc}") from exc
 
+        headline = str(data.get("headline", "")).strip()
         summary = str(data.get("summary", "")).strip()
         actions = data.get("top_actions", [])
         if not isinstance(actions, list):
             actions = []
         actions = [str(a).strip() for a in actions if str(a).strip()][:3]
-        return {"summary": summary, "top_actions": actions}
+        return {"headline": headline, "summary": summary, "top_actions": actions}
 
     # --- Call 3: chat Q&A ---
     def chat_answer(self, question: str, aggregation: dict[str, Any]) -> str:
