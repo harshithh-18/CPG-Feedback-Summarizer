@@ -53,19 +53,42 @@ EXTRACTION_RETRY_SUFFIX = (
 )
 
 SUMMARY_SYSTEM_PROMPT = (
-    "You are writing an executive summary for a product and marketing team, "
-    "based on aggregated CPG customer feedback statistics, including a list of "
-    "the most frequent emergent themes in this specific dataset. Your job is "
-    "to make this read as clearly about THIS dataset, not a generic template "
-    "— cite actual numbers, percentages, category names, and theme tags from "
-    "the data provided. Never write a sentence that could apply unchanged to "
-    "any other dataset. First write a headline: one punchy sentence, under 12 "
-    "words, naming the single most notable specific finding. Then a 3-5 "
-    "sentence summary citing at least one number and one theme tag or key "
-    "phrase verbatim from the data. Then exactly 3 top actions, each naming a "
-    "specific category or theme tag with its frequency or severity, not "
-    'generic advice. Return only valid JSON: {"headline": <string>, '
-    '"summary": <string>, "top_actions": [<string>, <string>, <string>]}.'
+    "You are a senior CPG insights analyst writing a decision-ready briefing "
+    "for a product and marketing leadership team, based on aggregated customer "
+    "feedback statistics that include sentiment counts, category counts, "
+    "channel counts, a severity-weighted category ranking, a week-bucketed "
+    "volume trend, and the most frequent emergent theme tags in THIS specific "
+    "dataset. Your writing must read as unmistakably about this dataset, not a "
+    "generic template: cite actual numbers, percentages, category names, and "
+    "theme tags verbatim from the data. Never write a sentence that could "
+    "apply unchanged to another dataset.\n\n"
+    "Produce these fields:\n"
+    "- headline: one punchy sentence under 12 words naming the single most "
+    "notable specific finding.\n"
+    "- summary: a substantial 6-8 sentence executive narrative. Open with the "
+    "overall sentiment picture (cite the negative %). Name the top 2-3 issue "
+    "categories by severity-weighted rank with their numbers. Quote at least "
+    "two specific emergent theme tags verbatim. Comment on how the volume "
+    "trend is moving (rising, falling, or steady) for the leading category. "
+    "Note any channel skew if one channel dominates the feedback. Close with "
+    "the single most urgent implication for the business.\n"
+    "- sentiment_trend: 2-3 sentences interpreting the sentiment distribution "
+    "AND the week-over-week volume trend together — is negativity concentrated "
+    "in one category or spread out, and is the problem growing or cooling? "
+    "Cite the trend numbers.\n"
+    "- key_categories: an array of the 3-4 most important issue categories. "
+    "For each: {\"category\": <name>, \"why_it_matters\": <2-3 sentence "
+    "explanation grounded in this data's numbers, severity, and the specific "
+    "theme tags falling under it>, \"metric\": <short stat string like "
+    "\"32 mentions · severity 128\">}.\n"
+    "- top_actions: exactly 3 detailed, sequenced recommendations. Each is 2 "
+    "sentences: what to do and which specific category/theme (with its "
+    "frequency or severity) justifies it. No generic advice.\n\n"
+    "Return only valid JSON with exactly these keys: "
+    '{"headline": <string>, "summary": <string>, "sentiment_trend": '
+    '<string>, "key_categories": [{"category": <string>, "why_it_matters": '
+    '<string>, "metric": <string>}], "top_actions": [<string>, <string>, '
+    "<string>]}."
 )
 
 CHAT_SYSTEM_PROMPT = (
@@ -74,6 +97,44 @@ CHAT_SYSTEM_PROMPT = (
     "to answer, say so directly rather than guessing. Return only valid JSON: "
     '{"answer": <string>}.'
 )
+
+
+def extract_partial_string(raw: str, key: str) -> str:
+    """Best-effort pull of a JSON string value while the object is still
+    streaming in. Returns whatever of ``key``'s value has arrived so far, with
+    escape sequences decoded, so the UI can render growing prose instead of raw
+    JSON braces. Returns "" if the key hasn't started streaming yet."""
+    marker = f'"{key}"'
+    ki = raw.find(marker)
+    if ki == -1:
+        return ""
+    ci = raw.find(":", ki + len(marker))
+    if ci == -1:
+        return ""
+    qi = raw.find('"', ci + 1)
+    if qi == -1:
+        return ""
+    out: list[str] = []
+    i = qi + 1
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                break  # escape not fully arrived yet
+            nxt = raw[i + 1]
+            out.append(
+                {"n": "\n", "t": "\t", "r": "", '"': '"', "\\": "\\", "/": "/"}.get(
+                    nxt, nxt
+                )
+            )
+            i += 2
+            continue
+        if ch == '"':
+            break  # closing quote — value complete
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 class AzureConfigError(RuntimeError):
@@ -173,6 +234,44 @@ class CPGAzureClient:
         content = resp.choices[0].message.content or ""
         return json.loads(content)
 
+    def _json_call_stream(
+        self, system_prompt: str, user_content: str, temperature: float
+    ):
+        """Streaming variant of `_json_call`.
+
+        Yields incremental content strings as they arrive, then yields a final
+        ``("__result__", dict)`` tuple with the parsed JSON. JSON mode still
+        applies, so the accumulated text is a single JSON object we parse once
+        the stream completes. If parsing fails, the tuple carries ``{}``.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self._deployment,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": True,
+        }
+        if not self._omit_temperature:
+            kwargs["temperature"] = temperature
+
+        acc: list[str] = []
+        for chunk in self._client.chat.completions.create(**kwargs):
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                acc.append(piece)
+                yield piece
+        raw = "".join(acc)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {}
+        yield ("__result__", parsed)
+
     # --- Call 1: batch extraction ---
     def extract_batch(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Extract structured fields for one batch of {id, text} items.
@@ -199,20 +298,60 @@ class CPGAzureClient:
             raise AzureCallError(f"Azure extraction call failed: {exc}") from exc
 
     # --- Call 2: executive summary ---
+    @staticmethod
+    def _normalize_summary(data: dict[str, Any]) -> dict[str, Any]:
+        headline = str(data.get("headline", "")).strip()
+        summary = str(data.get("summary", "")).strip()
+        sentiment_trend = str(data.get("sentiment_trend", "")).strip()
+
+        actions = data.get("top_actions", [])
+        if not isinstance(actions, list):
+            actions = []
+        actions = [str(a).strip() for a in actions if str(a).strip()][:3]
+
+        raw_cats = data.get("key_categories", [])
+        key_categories: list[dict[str, str]] = []
+        if isinstance(raw_cats, list):
+            for c in raw_cats:
+                if not isinstance(c, dict):
+                    continue
+                cat = str(c.get("category", "")).strip()
+                why = str(c.get("why_it_matters", "")).strip()
+                metric = str(c.get("metric", "")).strip()
+                if cat and why:
+                    key_categories.append(
+                        {"category": cat, "why_it_matters": why, "metric": metric}
+                    )
+        return {
+            "headline": headline,
+            "summary": summary,
+            "sentiment_trend": sentiment_trend,
+            "key_categories": key_categories,
+            "top_actions": actions,
+        }
+
     def executive_summary(self, aggregation: dict[str, Any]) -> dict[str, Any]:
         user_content = json.dumps(aggregation, ensure_ascii=False, default=str)
         try:
             data = self._json_call(SUMMARY_SYSTEM_PROMPT, user_content, 0.4)
         except Exception as exc:  # noqa: BLE001
             raise AzureCallError(f"Executive summary call failed: {exc}") from exc
+        return self._normalize_summary(data)
 
-        headline = str(data.get("headline", "")).strip()
-        summary = str(data.get("summary", "")).strip()
-        actions = data.get("top_actions", [])
-        if not isinstance(actions, list):
-            actions = []
-        actions = [str(a).strip() for a in actions if str(a).strip()][:3]
-        return {"headline": headline, "summary": summary, "top_actions": actions}
+    def executive_summary_stream(self, aggregation: dict[str, Any]):
+        """Streaming Call 2. Yields raw content chunks, then a final
+        ``("__result__", normalized_summary_dict)`` tuple."""
+        user_content = json.dumps(aggregation, ensure_ascii=False, default=str)
+        try:
+            for item in self._json_call_stream(
+                SUMMARY_SYSTEM_PROMPT, user_content, 0.4
+            ):
+                if isinstance(item, tuple) and item[0] == "__result__":
+                    yield ("__result__", self._normalize_summary(item[1]))
+                else:
+                    yield item
+        except Exception as exc:  # noqa: BLE001
+            raise AzureCallError(f"Executive summary call failed: {exc}") from exc
 
     # --- Call 3: chat Q&A ---
     def chat_answer(self, question: str, aggregation: dict[str, Any]) -> str:
@@ -226,6 +365,20 @@ class CPGAzureClient:
         except Exception as exc:  # noqa: BLE001
             raise AzureCallError(f"Chat call failed: {exc}") from exc
         return str(data.get("answer", "")).strip()
+
+    def chat_answer_stream(self, question: str, aggregation: dict[str, Any]):
+        """Streaming Call 3. Yields raw content chunks, then a final
+        ``("__result__", answer_string)`` tuple."""
+        payload = {"question": question, "aggregated_data": aggregation}
+        user_content = json.dumps(payload, ensure_ascii=False, default=str)
+        try:
+            for item in self._json_call_stream(CHAT_SYSTEM_PROMPT, user_content, 0.3):
+                if isinstance(item, tuple) and item[0] == "__result__":
+                    yield ("__result__", str(item[1].get("answer", "")).strip())
+                else:
+                    yield item
+        except Exception as exc:  # noqa: BLE001
+            raise AzureCallError(f"Chat call failed: {exc}") from exc
 
 
 def _coerce_results(data: dict[str, Any]) -> list[dict[str, Any]]:

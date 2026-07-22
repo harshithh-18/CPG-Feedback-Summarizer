@@ -2,3 +2,4 @@ streamlit>=1.40
 openai>=1.40
 pandas>=2.2
 python-dotenv>=1.0
+fpdf2>=2.7

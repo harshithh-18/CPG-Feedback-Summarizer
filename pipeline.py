@@ -246,6 +246,7 @@ def run_extraction(
     records: list[dict[str, Any]],
     extract_fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
     on_warning: Callable[[str], None] | None = None,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Scrub -> batch -> extract -> merge back by id.
 
@@ -253,14 +254,20 @@ def run_extraction(
     dicts (this is CPGAzureClient.extract_batch in production; a stub in tests).
     A batch that fails is dropped with a non-fatal warning; the run continues.
 
+    `on_progress(done_batches, total_batches, done_records)` is called after
+    each batch completes so the UI can render live checkpoints.
+
     Returns (merged_records, warnings).
     """
     warnings: list[str] = []
     scrubbed = scrub_records(records)
     by_id = {r["id"]: r for r in scrubbed}
     batches = make_batches(scrubbed)
+    total_batches = len(batches)
 
     extractions: dict[int, dict[str, Any]] = {}
+    done_batches = 0
+    done_records = 0
     with ThreadPoolExecutor(max_workers=min(MAX_BATCH_WORKERS, len(batches))) as pool:
         future_to_bi = {
             pool.submit(extract_fn, batch_payload(batch)): (bi, batch)
@@ -275,12 +282,17 @@ def run_extraction(
                 warnings.append(msg)
                 if on_warning:
                     on_warning(msg)
-                continue
+                results = []
 
             for res in results:
                 norm = _normalize_extraction(res)
                 if norm is not None and norm["id"] in by_id:
                     extractions[norm["id"]] = norm
+
+            done_batches += 1
+            done_records += len(batch)
+            if on_progress:
+                on_progress(done_batches, total_batches, done_records)
 
     merged: list[dict[str, Any]] = []
     for rid, raw in by_id.items():
