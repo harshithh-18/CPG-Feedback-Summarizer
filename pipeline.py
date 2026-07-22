@@ -25,6 +25,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
+import geo
+
 # --- Schema constants (mirror the Raw feedback record contract in CLAUDE.md) ---
 VALID_CHANNELS = {"social_review", "survey", "support_ticket"}
 VALID_CATEGORIES = {
@@ -306,6 +308,10 @@ def run_extraction(
                 "date": raw["date"],
                 "rating": raw["rating"],
                 "text": raw["text"],  # already PII-scrubbed
+                # Optional geo field — carried through only when the dataset
+                # supplies it (under any of location/city/state/region/place),
+                # so the India map lights up on real data.
+                "location": geo.location_field(raw),
                 "sentiment": ext["sentiment"],
                 "category": ext["category"],
                 "theme_tag": ext["theme_tag"],
@@ -360,6 +366,35 @@ def _normalize_extraction(res: Any) -> dict[str, Any] | None:
     }
 
 
+def compact_records_for_chat(
+    merged: list[dict[str, Any]], text_chars: int = 120
+) -> list[dict[str, Any]]:
+    """Trim merged records to a compact, token-light view for the chat call.
+
+    Keeps only the fields useful for answering questions about the feedback —
+    channel, date, sentiment, category, severity, theme, and a short preview of
+    the customer's own (already PII-scrubbed) words. Never includes anything
+    that isn't already safe to send.
+    """
+    compact: list[dict[str, Any]] = []
+    for r in merged:
+        text = r.get("text") or ""
+        preview = text[:text_chars] + ("…" if len(text) > text_chars else "")
+        compact.append(
+            {
+                "channel": r["channel"],
+                "date": r["date"],
+                "rating": r["rating"],
+                "sentiment": r["sentiment"],
+                "category": r["category"],
+                "severity": r["severity"],
+                "theme": r.get("theme_tag", ""),
+                "text": preview,
+            }
+        )
+    return compact
+
+
 # ---------------------------------------------------------------------------
 # Step 6 - Aggregation (pure Python, no LLM)
 # ---------------------------------------------------------------------------
@@ -379,6 +414,21 @@ def aggregate(merged: list[dict[str, Any]]) -> dict[str, Any]:
     sentiment_counts = Counter(r["sentiment"] for r in merged)
     category_counts = Counter(r["category"] for r in merged)
     channel_counts = Counter(r["channel"] for r in merged)
+
+    # Per-category sentiment split — drives the hover tooltip on each category
+    # bar (how many positive / negative / neutral make up that bar).
+    sentiment_by_category: dict[str, dict[str, int]] = {}
+    for cat in category_counts:
+        sentiment_by_category[cat] = {s: 0 for s in VALID_SENTIMENTS}
+    for r in merged:
+        sentiment_by_category[r["category"]][r["sentiment"]] += 1
+
+    # Per-channel sentiment split — same idea for the channel bars.
+    sentiment_by_channel: dict[str, dict[str, int]] = {}
+    for ch in channel_counts:
+        sentiment_by_channel[ch] = {s: 0 for s in VALID_SENTIMENTS}
+    for r in merged:
+        sentiment_by_channel[r["channel"]][r["sentiment"]] += 1
 
     # Severity-weighted ranking: sum of severity per category, desc.
     severity_by_cat: dict[str, int] = defaultdict(int)
@@ -419,16 +469,83 @@ def aggregate(merged: list[dict[str, Any]]) -> dict[str, Any]:
         (theme_labels[k], c) for k, c in theme_counter.most_common(10)
     ]
 
+    location_map = _aggregate_locations(merged)
+
     return {
         "total": total,
         "sentiment_counts": dict(sentiment_counts),
         "category_counts": dict(category_counts),
         "channel_counts": dict(channel_counts),
+        "sentiment_by_category": sentiment_by_category,
+        "sentiment_by_channel": sentiment_by_channel,
         "ranked_categories": ranked_categories,
         "top_priority": top_priority,
         "date_trend": date_trend,
         "top_emergent_themes": top_emergent_themes,
+        "location_map": location_map,
     }
+
+
+def _aggregate_locations(merged: list[dict[str, Any]]) -> dict[str, Any]:
+    """Group records by resolved Indian city/state for the map.
+
+    Returns a dict with:
+      - points: list of {location, lat, lon, total, top_category,
+        category_counts, sentiment_counts} — one per resolved place, so a
+        bubble can be sized by volume and colored by its dominant issue, and a
+        hover can reveal the per-issue breakdown.
+      - unplaced: count of records whose location string couldn't be resolved.
+      - located: count of records that carried any location string at all.
+
+    When no record carries a location, ``points`` is empty and the UI shows a
+    'add location data' placeholder instead of the map.
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    located = 0
+    unplaced = 0
+    for r in merged:
+        loc = r.get("location")
+        if not loc:
+            continue
+        located += 1
+        resolved = geo.resolve_location(loc)
+        if resolved is None:
+            unplaced += 1
+            continue
+        name, lat, lon = resolved
+        b = buckets.get(name)
+        if b is None:
+            b = {
+                "location": name,
+                "lat": lat,
+                "lon": lon,
+                "total": 0,
+                "category_counts": defaultdict(int),
+                "sentiment_counts": defaultdict(int),
+            }
+            buckets[name] = b
+        b["total"] += 1
+        b["category_counts"][r["category"]] += 1
+        b["sentiment_counts"][r["sentiment"]] += 1
+
+    points: list[dict[str, Any]] = []
+    for b in buckets.values():
+        cat_counts = dict(b["category_counts"])
+        top_category = max(cat_counts.items(), key=lambda kv: kv[1])[0] if cat_counts else "other"
+        points.append(
+            {
+                "location": b["location"],
+                "lat": b["lat"],
+                "lon": b["lon"],
+                "total": b["total"],
+                "top_category": top_category,
+                "category_counts": cat_counts,
+                "sentiment_counts": dict(b["sentiment_counts"]),
+            }
+        )
+    points.sort(key=lambda p: p["total"], reverse=True)
+
+    return {"points": points, "unplaced": unplaced, "located": located}
 
 
 # ---------------------------------------------------------------------------

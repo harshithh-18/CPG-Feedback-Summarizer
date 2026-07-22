@@ -72,8 +72,9 @@ Do not ask the model to echo back the original text in this call — merge `chan
 - `date_trend`: dict of week-bucket → count, for at least the top 1-2 categories by volume — enough to drive a trend chart
 
 **Executive summary output**
-- `summary`: str, 3-5 sentences, business-toned
-- `top_actions`: exactly 3 strings
+- `headline`: str, one sentence — must name a specific number and a specific `theme_tag` or category from the aggregate. No generic openers.
+- `whats_happening`: str, 2-4 sentences, plain everyday language; every claim traceable to a specific value in the aggregate.
+- `next_steps`: exactly 3 objects, each `{ "action": str, "department": "Product/R&D" | "Marketing" | "Customer Service", "why": str }` — `why` connects the action back to the specific number/theme driving it.
 
 **Chat answer output**
 - `answer`: str, 2-4 sentences, must be answerable strictly from the aggregation JSON passed in — if the aggregation doesn't contain enough to answer, the model should say so rather than inventing detail.
@@ -91,9 +92,35 @@ Do not ask the model to echo back the original text in this call — merge `chan
 
 ### Call 2 — Executive summary
 - One call, after aggregation is fully computed.
-- Input: the aggregation JSON only — never raw feedback text, to keep this call cheap.
+- Input: the aggregation JSON only — never raw feedback text, to keep this call cheap. The aggregate object is passed as the user message; the system prompt describes the fields it will contain.
+- Response schema (JSON mode):
+  ```json
+  {
+    "headline": "<one sentence naming a real number and a real theme_tag/category>",
+    "whats_happening": "<2-4 plain-language sentences, every claim tied to a specific number/category/theme_tag>",
+    "next_steps": [
+      { "action": "<one concrete sentence>", "department": "Product/R&D | Marketing | Customer Service", "why": "<one sentence tying the action to the number/theme driving it>" }
+    ]
+  }
+  ```
+  `next_steps` must contain exactly 3 objects.
 - System prompt:
-  > You are writing a concise executive summary for a product and marketing team, based on aggregated CPG customer feedback statistics. Be specific, business-toned, and actionable. Return only valid JSON: {"summary": <3-5 sentence string>, "top_actions": [<string>, <string>, <string>]}.
+  > You are explaining a product feedback analysis to someone who has never seen this data and has no background in statistics — explain it the way you'd explain it to a smart 12-year-old who just wants to know what's going on and what to do about it.
+  >
+  > You will be given ONLY an aggregate object (in the user message), computed from real feedback records: sentiment counts, category counts, channel counts, a severity-weighted category ranking, a week-bucketed volume trend, and the most frequent emergent theme tags in THIS dataset.
+  >
+  > Produce a JSON object with exactly these fields:
+  >
+  > headline — one sentence. Must name a specific number and a specific theme_tag or category from the data. No generic openers ("Overall,", "In summary,", "The data shows").
+  >
+  > whats_happening — 2 to 4 sentences in plain, everyday language explaining what's going on and why. Every sentence must be traceable to a specific value in the aggregate object. Do not use the words "sentiment," "aggregate," "metric," or "taxonomy" unless you define the word in the same sentence you use it.
+  >
+  > Example — bad: "Customer feedback indicates mixed sentiment regarding product quality, with several respondents citing concerns."
+  > Example — good: "Out of 340 people who gave feedback, 61 of them — about 1 in 5 — said the same thing: the resealable pouch tears when they try to open it. That's the single biggest complaint, bigger than price or taste."
+  >
+  > next_steps — exactly 3 objects, each with: action (one concrete sentence describing exactly what to do), department (one of "Product/R&D", "Marketing", "Customer Service"), why (one sentence connecting the action back to the specific number or theme driving it).
+  >
+  > Hard rules: No section headings anywhere in your output ("Key Insights," "Summary," "Overview," "Analysis," "Findings" are all banned). If a sentence could be pasted unchanged into a summary of a different dataset, rewrite it. Do not hedge with "may," "could," or "seems" when the aggregate data gives you a definite number.
 
 ### Call 3 — Chat Q&A
 - One call per user question, triggered from the chat box.
@@ -118,12 +145,13 @@ Do not ask the model to echo back the original text in this call — merge `chan
 - Primary control row: "Load Sample Data" button (loads `data/feedback.json`) and a file uploader as a secondary/fallback input, side by side.
 - Once data is loaded: an "Analyze" primary button, runs the full pipeline behind `st.spinner` with a message like "Analyzing N feedback entries...".
 - Once results exist, render in this order:
-  1. Three-column KPI row: total feedback, % negative, top issue category (`ranked_categories[0]`).
-  2. Executive summary section: the summary paragraph, then the 3 `top_actions` as a bulleted list.
-  3. Two-column charts row: `category_counts` bar chart, `sentiment_counts` bar chart.
-  4. Channel breakdown: small chart or table of `channel_counts` — makes the multi-channel ingestion claim visible.
-  5. "Top 5 priority issues" table: category, severity, key_phrase, actionable_insight, truncated text preview.
-  6. Chat section at the bottom: `st.chat_input`, responses rendered via `st.chat_message("assistant")`.
+  1. Three-column KPI row: total feedback, % negative, top issue category (`ranked_categories[0]`), plus a one-line sentiment-mood summary (no standalone sentiment bar chart — the mood is conveyed inline).
+  2. Executive summary section: the `headline`, then `whats_happening` rendered as clickable/expandable lines (each sentence expands to show the aggregate numbers behind it), then the 3 `next_steps` as a bulleted list — each bullet shows the `action`, a small `department` tag, and the `why` on a second line. No hardcoded section labels.
+  3. `category_counts` bar chart (Plotly, horizontal, stacked and colored by sentiment — hovering a bar reveals its positive/negative/neutral split).
+  4. India map (Plotly Scattergeo): one bubble per resolved Indian city, sized by feedback volume and colored by its dominant issue; hover shows the city's per-issue and per-sentiment breakdown. Falls back to a friendly placeholder when the dataset carries no `location` field.
+  5. Channel breakdown: `channel_counts` as a Plotly stacked-by-sentiment bar (hover for the split) — makes the multi-channel ingestion claim visible.
+  6. "Top 5 priority issues" table: category, severity, key_phrase, actionable_insight, truncated text preview.
+  7. Chat section at the bottom: `st.chat_input`, responses rendered via `st.chat_message("assistant")`.
 - Cheap polish only: `.streamlit/config.toml` sets a non-default accent color (warm orange or green rather than Streamlit's default red); hide the default hamburger menu and "Made with Streamlit" footer via standard Streamlit config.
 - Keep loaded feedback and pipeline results in `st.session_state` so button interactions don't lose prior state.
 

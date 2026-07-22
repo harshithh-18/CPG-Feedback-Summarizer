@@ -53,49 +53,73 @@ EXTRACTION_RETRY_SUFFIX = (
 )
 
 SUMMARY_SYSTEM_PROMPT = (
-    "You are a senior CPG insights analyst writing a decision-ready briefing "
-    "for a product and marketing leadership team, based on aggregated customer "
-    "feedback statistics that include sentiment counts, category counts, "
-    "channel counts, a severity-weighted category ranking, a week-bucketed "
-    "volume trend, and the most frequent emergent theme tags in THIS specific "
-    "dataset. Your writing must read as unmistakably about this dataset, not a "
-    "generic template: cite actual numbers, percentages, category names, and "
-    "theme tags verbatim from the data. Never write a sentence that could "
-    "apply unchanged to another dataset.\n\n"
-    "Produce these fields:\n"
-    "- headline: one punchy sentence under 12 words naming the single most "
-    "notable specific finding.\n"
-    "- summary: a substantial 6-8 sentence executive narrative. Open with the "
-    "overall sentiment picture (cite the negative %). Name the top 2-3 issue "
-    "categories by severity-weighted rank with their numbers. Quote at least "
-    "two specific emergent theme tags verbatim. Comment on how the volume "
-    "trend is moving (rising, falling, or steady) for the leading category. "
-    "Note any channel skew if one channel dominates the feedback. Close with "
-    "the single most urgent implication for the business.\n"
-    "- sentiment_trend: 2-3 sentences interpreting the sentiment distribution "
-    "AND the week-over-week volume trend together — is negativity concentrated "
-    "in one category or spread out, and is the problem growing or cooling? "
-    "Cite the trend numbers.\n"
-    "- key_categories: an array of the 3-4 most important issue categories. "
-    "For each: {\"category\": <name>, \"why_it_matters\": <2-3 sentence "
-    "explanation grounded in this data's numbers, severity, and the specific "
-    "theme tags falling under it>, \"metric\": <short stat string like "
-    "\"32 mentions · severity 128\">}.\n"
-    "- top_actions: exactly 3 detailed, sequenced recommendations. Each is 2 "
-    "sentences: what to do and which specific category/theme (with its "
-    "frequency or severity) justifies it. No generic advice.\n\n"
+    "You are explaining a product feedback analysis to someone who has never "
+    "seen this data and has no background in statistics — explain it the way "
+    "you'd explain it to a smart 12-year-old who just wants to know what's "
+    "going on and what to do about it.\n\n"
+    "You will be given ONLY an aggregate object (in the user message), computed "
+    "from real feedback records: sentiment counts, category counts, channel "
+    "counts, a severity-weighted category ranking, a week-bucketed volume "
+    "trend, and the most frequent emergent theme tags in THIS dataset.\n\n"
+    "Produce a JSON object with exactly these fields:\n\n"
+    "headline — one sentence. Must name a specific number and a specific "
+    "theme_tag or category from the data. No generic openers (\"Overall,\", "
+    "\"In summary,\", \"The data shows\").\n\n"
+    "whats_happening — 2 to 4 sentences in plain, everyday language explaining "
+    "what's going on and why. Every sentence must be traceable to a specific "
+    "value in the aggregate object. Do not use the words \"sentiment\", "
+    "\"aggregate\", \"metric\", or \"taxonomy\" unless you define the word in "
+    "the same sentence you use it.\n\n"
+    "Example — bad: \"Customer feedback indicates mixed sentiment regarding "
+    "product quality, with several respondents citing concerns.\"\n"
+    "Example — good: \"Out of 340 people who gave feedback, 61 of them — about "
+    "1 in 5 — said the same thing: the resealable pouch tears when they try to "
+    "open it. That's the single biggest complaint, bigger than price or "
+    "taste.\"\n\n"
+    "next_steps — exactly 3 objects, each with:\n"
+    "  - action: one concrete sentence describing exactly what to do\n"
+    "  - department: one of \"Product/R&D\", \"Marketing\", \"Customer "
+    "Service\"\n"
+    "  - why: one sentence connecting the action back to the specific number "
+    "or theme driving it\n\n"
+    "Hard rules:\n"
+    "- No section headings anywhere in your output (\"Key Insights\", "
+    "\"Summary\", \"Overview\", \"Analysis\", \"Findings\" are all banned).\n"
+    "- If a sentence could be pasted unchanged into a summary of a different "
+    "dataset, rewrite it — it isn't specific enough.\n"
+    "- Do not hedge with \"may\", \"could\", or \"seems\" when the aggregate "
+    "data gives you a definite number.\n\n"
     "Return only valid JSON with exactly these keys: "
-    '{"headline": <string>, "summary": <string>, "sentiment_trend": '
-    '<string>, "key_categories": [{"category": <string>, "why_it_matters": '
-    '<string>, "metric": <string>}], "top_actions": [<string>, <string>, '
-    "<string>]}."
+    '{"headline": <string>, "whats_happening": <string>, "next_steps": '
+    '[{"action": <string>, "department": <string>, "why": <string>}]}.'
 )
 
+# Departments Call 2 may tag a next step with, mapped to canonical display form.
+_DEPARTMENT_MAP = {
+    "product/r&d": "Product/R&D",
+    "product/rd": "Product/R&D",
+    "product": "Product/R&D",
+    "r&d": "Product/R&D",
+    "rd": "Product/R&D",
+    "marketing": "Marketing",
+    "customer service": "Customer Service",
+    "customer support": "Customer Service",
+    "support": "Customer Service",
+}
+
 CHAT_SYSTEM_PROMPT = (
-    "Answer the user's question about CPG customer feedback using only the "
-    "aggregated data provided. If the data doesn't contain enough information "
-    "to answer, say so directly rather than guessing. Return only valid JSON: "
-    '{"answer": <string>}.'
+    "You help a business owner understand their own customers' feedback. You "
+    "are given two things: aggregated statistics, and a list of the actual "
+    "individual feedback records (each already stripped of personal "
+    "information, with its category, sentiment, severity, theme, and the "
+    "customer's own words). Answer the user's question using this data. You may "
+    "cite what specific customers actually said, count how many mention "
+    "something, and point to the real theme tags — ground every claim in the "
+    "records or the aggregates provided, never invent feedback that isn't "
+    "there. Reply in plain, friendly language a non-technical person "
+    "understands, in 2-4 sentences. If the provided data genuinely doesn't "
+    "cover the question, say so plainly instead of guessing. Return only valid "
+    'JSON: {"answer": <string>}.'
 )
 
 
@@ -298,36 +322,36 @@ class CPGAzureClient:
             raise AzureCallError(f"Azure extraction call failed: {exc}") from exc
 
     # --- Call 2: executive summary ---
-    @staticmethod
-    def _normalize_summary(data: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def _normalize_summary(cls, data: dict[str, Any]) -> dict[str, Any]:
         headline = str(data.get("headline", "")).strip()
-        summary = str(data.get("summary", "")).strip()
-        sentiment_trend = str(data.get("sentiment_trend", "")).strip()
+        whats_happening = str(data.get("whats_happening", "")).strip()
 
-        actions = data.get("top_actions", [])
-        if not isinstance(actions, list):
-            actions = []
-        actions = [str(a).strip() for a in actions if str(a).strip()][:3]
-
-        raw_cats = data.get("key_categories", [])
-        key_categories: list[dict[str, str]] = []
-        if isinstance(raw_cats, list):
-            for c in raw_cats:
-                if not isinstance(c, dict):
+        raw_steps = data.get("next_steps", [])
+        next_steps: list[dict[str, str]] = []
+        if isinstance(raw_steps, list):
+            for s in raw_steps:
+                if not isinstance(s, dict):
                     continue
-                cat = str(c.get("category", "")).strip()
-                why = str(c.get("why_it_matters", "")).strip()
-                metric = str(c.get("metric", "")).strip()
-                if cat and why:
-                    key_categories.append(
-                        {"category": cat, "why_it_matters": why, "metric": metric}
-                    )
+                action = str(s.get("action", "")).strip()
+                if not action:
+                    continue
+                department = _DEPARTMENT_MAP.get(
+                    str(s.get("department", "")).strip().lower(), "Product/R&D"
+                )
+                next_steps.append(
+                    {
+                        "action": action,
+                        "department": department,
+                        "why": str(s.get("why", "")).strip(),
+                    }
+                )
+        next_steps = next_steps[:3]
+
         return {
             "headline": headline,
-            "summary": summary,
-            "sentiment_trend": sentiment_trend,
-            "key_categories": key_categories,
-            "top_actions": actions,
+            "whats_happening": whats_happening,
+            "next_steps": next_steps,
         }
 
     def executive_summary(self, aggregation: dict[str, Any]) -> dict[str, Any]:
@@ -354,23 +378,42 @@ class CPGAzureClient:
             raise AzureCallError(f"Executive summary call failed: {exc}") from exc
 
     # --- Call 3: chat Q&A ---
-    def chat_answer(self, question: str, aggregation: dict[str, Any]) -> str:
-        payload = {
+    def _chat_payload(
+        self,
+        question: str,
+        aggregation: dict[str, Any],
+        records: list[dict[str, Any]] | None,
+    ) -> str:
+        payload: dict[str, Any] = {
             "question": question,
             "aggregated_data": aggregation,
         }
-        user_content = json.dumps(payload, ensure_ascii=False, default=str)
+        if records is not None:
+            payload["feedback_records"] = records
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def chat_answer(
+        self,
+        question: str,
+        aggregation: dict[str, Any],
+        records: list[dict[str, Any]] | None = None,
+    ) -> str:
+        user_content = self._chat_payload(question, aggregation, records)
         try:
             data = self._json_call(CHAT_SYSTEM_PROMPT, user_content, 0.3)
         except Exception as exc:  # noqa: BLE001
             raise AzureCallError(f"Chat call failed: {exc}") from exc
         return str(data.get("answer", "")).strip()
 
-    def chat_answer_stream(self, question: str, aggregation: dict[str, Any]):
+    def chat_answer_stream(
+        self,
+        question: str,
+        aggregation: dict[str, Any],
+        records: list[dict[str, Any]] | None = None,
+    ):
         """Streaming Call 3. Yields raw content chunks, then a final
         ``("__result__", answer_string)`` tuple."""
-        payload = {"question": question, "aggregated_data": aggregation}
-        user_content = json.dumps(payload, ensure_ascii=False, default=str)
+        user_content = self._chat_payload(question, aggregation, records)
         try:
             for item in self._json_call_stream(CHAT_SYSTEM_PROMPT, user_content, 0.3):
                 if isinstance(item, tuple) and item[0] == "__result__":

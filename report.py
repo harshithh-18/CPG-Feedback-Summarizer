@@ -161,43 +161,34 @@ def build_report(
         pdf.cell(col_w - 6, 8, _clean(val))
     pdf.set_y(y0 + 24)
 
-    # --- Executive summary ---
-    _section_title(pdf, "Executive Summary")
-    _body(pdf, summary.get("summary", "") or "Summary unavailable for this run.")
+    # --- Plain-language summary ---
+    _section_title(pdf, "What Your Customers Are Saying")
+    _body(
+        pdf,
+        summary.get("whats_happening", "") or "Summary unavailable for this run.",
+    )
 
-    trend = summary.get("sentiment_trend", "").strip()
-    if trend:
-        _section_title(pdf, "Sentiment & Volume Trend")
-        _body(pdf, trend)
-
-    # --- Key categories ---
-    key_cats = summary.get("key_categories", [])
-    if key_cats:
-        _section_title(pdf, "Key Complaint Categories")
-        for c in key_cats:
+    # --- Concrete next steps (action + department + why) ---
+    steps = summary.get("next_steps", [])
+    if steps:
+        _section_title(pdf, "What To Do Next")
+        for i, s in enumerate(steps, start=1):
+            action = s.get("action", "")
+            department = s.get("department", "").strip()
             pdf.set_x(pdf.l_margin)
             pdf.set_font("Helvetica", "B", 10.5)
             pdf.set_text_color(*CORAL)
-            name = c.get("category", "").replace("_", " ").title()
-            metric = c.get("metric", "")
-            pdf.multi_cell(
-                0, 5.6, _clean(f"{name}" + (f"   ({metric})" if metric else ""))
-            )
-            _body(pdf, c.get("why_it_matters", ""))
-
-    # --- Recommended actions ---
-    actions = summary.get("top_actions", [])
-    if actions:
-        _section_title(pdf, "Recommended Actions")
-        for i, a in enumerate(actions, start=1):
-            pdf.set_x(pdf.l_margin)
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(*ACCENT)
-            pdf.cell(6, 5.4, _clean(f"{i}."))
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(*INK)
-            pdf.multi_cell(0, 5.4, _clean(a))
-            pdf.ln(0.5)
+            head = f"{i}. {action}"
+            pdf.multi_cell(0, 5.6, _clean(head))
+            if department:
+                pdf.set_x(pdf.l_margin)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_text_color(*ACCENT)
+                pdf.multi_cell(0, 5, _clean(f"Owner: {department}"))
+            why = s.get("why", "").strip()
+            if why:
+                _body(pdf, why)
+            pdf.ln(1)
 
     # --- Breakdown bars ---
     pdf.add_page()
